@@ -464,7 +464,7 @@ export function registerGithubGitHandlers() {
       }
 
       const redirectUri = 'http://127.0.0.1:54124/callback';
-      const authUrl = `https://github.com/login/oauth/authorize?client_id=${finalClientId}&scope=repo,read:user,workflow&redirect_uri=${encodeURIComponent(redirectUri)}`;
+      const authUrl = `https://github.com/login/oauth/authorize?client_id=${finalClientId}&scope=repo,read:user&redirect_uri=${encodeURIComponent(redirectUri)}`;
       
       return new Promise((resolve) => {
         startLocalOauthServer(finalClientId, finalClientSecret, async (token) => {

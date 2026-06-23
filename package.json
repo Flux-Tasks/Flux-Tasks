@@ -2,7 +2,21 @@
   "name": "flux-tasks",
   "productName": "Flux Tasks",
   "private": true,
-  "version": "1.1.21",
+  "version": "1.1.22",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Flux-Tasks/Flux-Tasks.git"
+  },
+  "homepage": "https://github.com/Flux-Tasks/Flux-Tasks#readme",
+  "description": "Local-first desktop task manager with GitHub integration and background reminders.",
+  "author": {
+    "name": "Flux Tasks Organization",
+    "url": "https://github.com/Flux-Tasks"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Flux-Tasks/Flux-Tasks/issues"
+  },
   "type": "commonjs",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -16,6 +30,7 @@
     "release": "node scripts/release.js",
     "upload-release": "node scripts/upload-release.js",
     "upload-web-package": "node scripts/upload-release.js --setup-only",
+    "generate:update-manifest": "node scripts/generate-update-manifest.js",
     "clean": "rm -rf dist dist-electron release",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts"
@@ -30,6 +45,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
     "electron": "^42.4.1",
     "electron-builder": "^26.15.3",
@@ -44,6 +60,11 @@
     "productName": "Flux Tasks",
     "directories": {
       "output": "release"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Flux-Tasks",
+      "repo": "Flux-Tasks"
     },
     "files": [
       "dist/**/*",

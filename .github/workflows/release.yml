@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    env:
+      GITHUB_OWNER: Flux-Tasks
+      GITHUB_REPO: Flux-Tasks
+      RELEASE_CHANNEL: stable
+      CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+
+      - name: Resolve release channel
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $channel = if ($version -match "-(alpha|beta|rc)") { $Matches[1] } else { "stable" }
+          "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Require Windows code-signing secrets
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK) -or [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD secrets are required for public releases."
+          }
+
+      - run: npm run build:frontend
+      - run: npm run build:electron
+      - run: npx electron-builder --win --publish never
+
+      - name: Verify Authenticode signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature "release/Flux Tasks Setup.exe"
+          if ($signature.Status -ne "Valid") {
+            throw "Installer Authenticode signature is not valid: $($signature.StatusMessage)"
+          }
+
+      - name: Prepare update assets
+        shell: pwsh
+        run: |
+          Copy-Item "release/win-unpacked/resources/app.asar" "release/app.asar" -Force
+          node scripts/generate-update-manifest.js "--channel=$env:RELEASE_CHANNEL"
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match package version v$version"
+          }
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}"
+          $prerelease = if ($env:RELEASE_CHANNEL -eq "stable") { @() } else { @("--prerelease") }
+          gh release view $tag --repo "$env:GITHUB_OWNER/$env:GITHUB_REPO" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "$env:GITHUB_OWNER/$env:GITHUB_REPO" --title "Flux Tasks $tag" --generate-notes @prerelease
+          }
+          $assets = @(
+            "release/app.asar",
+            "release/Flux.Tasks.Setup.exe"
+          )
+          if ($env:RELEASE_CHANNEL -eq "stable") {
+            $assets += "release/manifests/latest.yml"
+            $assets += "release/manifests/latest.json"
+            $assets += "release/manifests/latest-stable.json"
+          } else {
+            $assets += "release/manifests/latest-$env:RELEASE_CHANNEL.json"
+          }
+          gh release upload $tag @assets --repo "$env:GITHUB_OWNER/$env:GITHUB_REPO" --clobber

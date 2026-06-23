@@ -808,7 +808,7 @@ export const Sidebar: React.FC = () => {
                     <label className="text-[9px] font-semibold text-slate-400 uppercase tracking-wider">GitHub Owner</label>
                     <input
                       type="text"
-                      placeholder="e.g. Straniksss"
+                      placeholder="e.g. Flux-Tasks"
                       value={editProjGithubOwner}
                       onChange={(e) => setEditProjGithubOwner(e.target.value)}
                       className="w-full py-2 px-3 text-xs rounded-xl border border-white/[0.08] bg-black/45 text-white placeholder-slate-600 focus:outline-none focus:border-flux-azure"

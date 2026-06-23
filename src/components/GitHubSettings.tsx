@@ -234,7 +234,7 @@ export const GitHubSettings: React.FC = () => {
         <form onSubmit={handleConnect} className="space-y-4">
           <div className="flex justify-start">
             <a
-              href="https://github.com/settings/tokens/new?description=Flux%20Tasks&scopes=repo,read:user,workflow"
+              href="https://github.com/settings/tokens/new?description=Flux%20Tasks&scopes=repo,read:user"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 py-1.5 px-3.5 rounded-lg border border-indigo-500/25 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 font-bold text-xs transition-all cursor-pointer select-none"

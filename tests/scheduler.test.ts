@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isScheduledReleaseDue, shouldSendReminder } from '../electron/scheduler-logic';
+import { isTrustedUpdateUrl } from '../electron/repository';
 import { Task } from '../src/types';
 
 const task = (overrides: Partial<Task> = {}): Task => ({
@@ -29,4 +30,10 @@ test('hourly reminders repeat only after interval', () => {
 test('scheduled releases become due at scheduled time', () => {
   assert.equal(isScheduledReleaseDue('scheduled', '2026-01-01T10:00:00Z', Date.parse('2026-01-01T10:00:00Z')), true);
   assert.equal(isScheduledReleaseDue('failed', '2026-01-01T10:00:00Z', Date.parse('2026-01-01T11:00:00Z')), false);
+});
+
+test('updater only accepts assets from the organization repository', () => {
+  assert.equal(isTrustedUpdateUrl('https://github.com/Flux-Tasks/Flux-Tasks/releases/download/v1.2.0/app.asar'), true);
+  assert.equal(isTrustedUpdateUrl('https://github.com/Untrusted-Org/Flux-Tasks/releases/download/v1.2.0/app.asar'), false);
+  assert.equal(isTrustedUpdateUrl('https://example.com/app.asar'), false);
 });

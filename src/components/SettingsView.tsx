@@ -261,6 +261,19 @@ export const SettingsView: React.FC = () => {
         <p className="text-xs text-slate-400">{getTranslation(lang, 'controlDesignSystemDesc')}</p>
       </div>
 
+      <div className="p-4 rounded-2xl border border-white/5 bg-slate-950/20">
+        <h3 className="text-xs font-semibold text-slate-200 mb-3 flex items-center gap-2">
+          <Icons.Github className="w-4 h-4" /> Flux Tasks
+        </h3>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <a href="https://github.com/Flux-Tasks/Flux-Tasks" target="_blank" rel="noreferrer" className="btn-secondary px-3 py-2">Repository</a>
+          <a href="https://github.com/Flux-Tasks/Flux-Tasks/releases/latest" target="_blank" rel="noreferrer" className="btn-secondary px-3 py-2">Release Notes</a>
+          <a href="https://github.com/Flux-Tasks/Flux-Tasks/issues/new/choose" target="_blank" rel="noreferrer" className="btn-secondary px-3 py-2">Report Issue</a>
+          <a href="https://github.com/Flux-Tasks/Flux-Tasks#readme" target="_blank" rel="noreferrer" className="btn-secondary px-3 py-2">Documentation</a>
+          <a href="https://github.com/Flux-Tasks/Flux-Tasks/releases" target="_blank" rel="noreferrer" className="btn-secondary px-3 py-2">Downloads</a>
+        </div>
+      </div>
+
       <div className="p-5 rounded-2xl border border-white/5 bg-slate-950/20 space-y-4">
         <h3 className="text-sm font-semibold text-white flex items-center gap-2"><Icons.BellRing className="w-4 h-4 text-amber-400" /> Фоновая работа и публикации</h3>
         {[

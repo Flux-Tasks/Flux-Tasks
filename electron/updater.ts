@@ -6,6 +6,13 @@ import * as https from 'https';
 import * as http from 'http';
 import { spawn } from 'child_process';
 import { getAppDataPath } from './database';
+import {
+  GITHUB_OWNER,
+  GITHUB_REPO,
+  GITHUB_REPOSITORY_URL,
+  UPDATE_MANIFEST_URL,
+  isTrustedUpdateUrl
+} from './repository';
 
 // Update directories
 const APP_DATA_PATH = getAppDataPath();
@@ -240,8 +247,8 @@ export async function checkForUpdates(channel: string): Promise<{ updateAvailabl
     } catch (e) {}
   }
 
-  const repoOwner = 'Straniksss';
-  const repoName = 'Flux-Tasks';
+  const repoOwner = GITHUB_OWNER;
+  const repoName = GITHUB_REPO;
 
   let manifest: any = null;
   const manifestCandidates: any[] = [];
@@ -303,10 +310,9 @@ export async function checkForUpdates(channel: string): Promise<{ updateAvailabl
   const manifestFilename = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
   const fallbackUrls: string[] = [];
   if (channel === 'stable') {
-    fallbackUrls.push(`https://github.com/${repoOwner}/${repoName}/releases/latest/download/latest.json`);
+    fallbackUrls.push(UPDATE_MANIFEST_URL);
   }
   fallbackUrls.push(`https://raw.githubusercontent.com/${repoOwner}/${repoName}/main/packages/${channel}/${manifestFilename}`);
-  fallbackUrls.push(`https://straniksss.github.io/Flux-Tasks/packages/${channel}/${manifestFilename}`);
 
   for (const url of fallbackUrls) {
     try {
@@ -431,6 +437,11 @@ export async function downloadUpdateFile(manifest: any): Promise<{ success: bool
     logUpdateEvent('Download error: No package download URL in manifest');
     process.noAsar = originalNoAsar;
     return { success: false, error: 'No package download URL in manifest' };
+  }
+  if (!isTrustedUpdateUrl(url)) {
+    logUpdateEvent(`Download error: Untrusted update URL: ${url}`);
+    process.noAsar = originalNoAsar;
+    return { success: false, error: `Update URL is outside ${GITHUB_REPOSITORY_URL}` };
   }
 
   const filename = path.basename(url.split('?')[0]);

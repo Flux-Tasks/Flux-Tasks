@@ -114,8 +114,9 @@ function githubRequest(method, urlPath, token, data, isUpload = false, uploadHos
     path: urlPath,
     headers: {
       'User-Agent': 'Flux Tasks Release Bot',
-      'Authorization': `token ${token}`,
-      'Accept': 'application/vnd.github.v3+json'
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
     }
   };
 
@@ -266,7 +267,7 @@ async function startRelease() {
 
   try {
     // 0. Загрузка конфигурации по умолчанию
-    let repoOwner = 'Straniksss';
+    let repoOwner = 'Flux-Tasks';
     let repoName = 'Flux-Tasks';
     let token = process.env.GITHUB_TOKEN;
 
