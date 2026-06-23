@@ -1,0 +1,1394 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace FluxTasks.WebInstaller
+{
+    internal sealed class InstallerConfig
+    {
+        public string Version = "1.1.20";
+        public string PrimaryUrl = "";
+        public string MirrorUrl = "";
+        public string ExpectedSha256 = "";
+        public string FileName = "FluxTasks-Setup.exe";
+
+        public static InstallerConfig Load(string path)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException("installer-config.json was not found.", path);
+
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            InstallerConfig config = new InstallerConfig();
+            config.Version = Read(json, "version", true);
+            config.PrimaryUrl = Read(json, "primaryUrl", true);
+            config.MirrorUrl = Read(json, "mirrorUrl", false);
+            config.ExpectedSha256 = Read(json, "expectedSha256", true).Trim().ToLowerInvariant();
+            config.FileName = Read(json, "fileName", true);
+
+            if (!Regex.IsMatch(config.ExpectedSha256, "^[a-f0-9]{64}$"))
+                throw new InvalidDataException("expectedSha256 must contain exactly 64 hexadecimal characters.");
+            if (!Uri.IsWellFormedUriString(config.PrimaryUrl, UriKind.Absolute))
+                throw new InvalidDataException("primaryUrl must be an absolute URL.");
+            if (!String.IsNullOrWhiteSpace(config.MirrorUrl) &&
+                !Uri.IsWellFormedUriString(config.MirrorUrl, UriKind.Absolute))
+                throw new InvalidDataException("mirrorUrl must be an absolute URL.");
+            if (Path.GetFileName(config.FileName) != config.FileName)
+                throw new InvalidDataException("fileName must not contain a path.");
+
+            return config;
+        }
+
+        private static string Read(string json, string key, bool required)
+        {
+            Match match = Regex.Match(
+                json,
+                "\"" + Regex.Escape(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"",
+                RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                if (required) throw new InvalidDataException("Missing config field: " + key);
+                return "";
+            }
+            return Regex.Unescape(match.Groups[1].Value);
+        }
+    }
+
+    internal sealed class DownloadResult
+    {
+        public string Path;
+        public long Bytes;
+        public long ExpectedBytes;
+        public string Sha256;
+    }
+
+    internal sealed class ReliableDownloader
+    {
+        private readonly InstallerConfig config;
+        private readonly string logPath;
+        private readonly Action<int, long, long, double> progress;
+        private readonly Action<string> status;
+        private volatile bool cancelled;
+        private HttpWebRequest activeRequest;
+
+        public ReliableDownloader(
+            InstallerConfig config,
+            string logPath,
+            Action<int, long, long, double> progress,
+            Action<string> status)
+        {
+            this.config = config;
+            this.logPath = logPath;
+            this.progress = progress;
+            this.status = status;
+        }
+
+        public void Cancel()
+        {
+            cancelled = true;
+            HttpWebRequest request = activeRequest;
+            if (request != null)
+            {
+                try { request.Abort(); } catch { }
+            }
+        }
+
+        public DownloadResult Download(string partPath, string finalPath)
+        {
+            Exception primaryError = null;
+            try
+            {
+                return DownloadFromSource(config.PrimaryUrl, partPath, finalPath, false);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                primaryError = ex;
+                Log("Primary source failed after retries: " + ex);
+            }
+
+            if (!String.IsNullOrWhiteSpace(config.MirrorUrl))
+            {
+                status("mirror");
+                Log("Primary server unavailable; switching to mirror URL: " + config.MirrorUrl);
+                try
+                {
+                    return DownloadFromSource(config.MirrorUrl, partPath, finalPath, true);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception mirrorError)
+                {
+                    throw new IOException(
+                        "Primary and mirror downloads failed. Primary: " +
+                        primaryError.Message + " Mirror: " + mirrorError.Message,
+                        mirrorError);
+                }
+            }
+
+            throw primaryError;
+        }
+
+        private DownloadResult DownloadFromSource(
+            string url,
+            string partPath,
+            string finalPath,
+            bool mirror)
+        {
+            int[] delays = new int[] { 1000, 3000, 7000 };
+            Exception lastError = null;
+
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                ThrowIfCancelled();
+                Log("Download URL: " + url);
+                Log("Retry attempt: " + attempt + "/3" + (mirror ? " (mirror)" : " (primary)"));
+                try
+                {
+                    DownloadResult result = DownloadAttempt(url, partPath);
+                    VerifyAndCommit(result, partPath, finalPath);
+                    result.Path = finalPath;
+                    Log("Final installer path: " + finalPath);
+                    return result;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    Log("Attempt failed: " + ex);
+                    activeRequest = null;
+                    if (attempt < 3)
+                    {
+                        status("retry:" + attempt);
+                        SleepCancelable(delays[attempt - 1]);
+                    }
+                }
+            }
+
+            throw lastError ?? new IOException("Download failed.");
+        }
+
+        private DownloadResult DownloadAttempt(string url, string partPath)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(partPath));
+            long existingBytes = File.Exists(partPath) ? new FileInfo(partPath).Length : 0;
+            bool requestedResume = existingBytes > 0;
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            activeRequest = request;
+            request.Method = "GET";
+            request.UserAgent = "FluxTasksInstaller/" + config.Version;
+            request.AllowAutoRedirect = true;
+            request.MaximumAutomaticRedirections = 10;
+            request.Timeout = 15000;
+            request.ReadWriteTimeout = 30000;
+            request.KeepAlive = true;
+            request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            if (requestedResume) request.AddRange(existingBytes);
+
+            DateTime started = DateTime.UtcNow;
+            long lastBytes = existingBytes;
+            DateTime lastSpeedAt = started;
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                int statusCode = (int)response.StatusCode;
+                Log("HTTP status: " + statusCode + " " + response.StatusDescription);
+                Log("Final response URL: " + response.ResponseUri);
+                Log("Content-Type: " + (response.ContentType ?? "unknown"));
+                Log("Content-Length: " + response.ContentLength);
+                Log("Accept-Ranges: " + (response.Headers["Accept-Ranges"] ?? "not provided"));
+
+                if (statusCode < 200 || statusCode >= 300)
+                    throw new WebException("Unexpected HTTP status: " + statusCode);
+                ValidateContentType(response.ContentType);
+
+                bool resumed = requestedResume && statusCode == (int)HttpStatusCode.PartialContent;
+                if (requestedResume && !resumed)
+                {
+                    Log("Server did not honor Range; restarting from byte 0.");
+                    existingBytes = 0;
+                }
+
+                long expectedTotal = ResolveExpectedTotal(response, existingBytes, resumed);
+                FileMode mode = resumed ? FileMode.Append : FileMode.Create;
+                long downloaded = existingBytes;
+
+                using (Stream input = response.GetResponseStream())
+                using (FileStream output = new FileStream(partPath, mode, FileAccess.Write, FileShare.None, 1024 * 128))
+                {
+                    byte[] buffer = new byte[1024 * 128];
+                    while (true)
+                    {
+                        ThrowIfCancelled();
+                        int read = input.Read(buffer, 0, buffer.Length);
+                        if (read <= 0) break;
+                        output.Write(buffer, 0, read);
+                        downloaded += read;
+
+                        DateTime now = DateTime.UtcNow;
+                        double elapsed = (now - lastSpeedAt).TotalSeconds;
+                        double speed = 0;
+                        if (elapsed >= 0.35)
+                        {
+                            speed = (downloaded - lastBytes) / elapsed;
+                            lastBytes = downloaded;
+                            lastSpeedAt = now;
+                        }
+                        int percent = expectedTotal > 0
+                            ? (int)Math.Min(100, (downloaded * 100L) / expectedTotal)
+                            : 0;
+                        progress(percent, downloaded, expectedTotal, speed);
+                    }
+                    output.Flush(true);
+                }
+
+                Log("Downloaded bytes: " + downloaded);
+                if (downloaded <= 0)
+                    throw new InvalidDataException("Downloaded file is empty.");
+                if (expectedTotal > 0 && downloaded != expectedTotal)
+                    throw new InvalidDataException(
+                        "Download incomplete: " + downloaded + "/" + expectedTotal + " bytes.");
+
+                return new DownloadResult
+                {
+                    Path = partPath,
+                    Bytes = downloaded,
+                    ExpectedBytes = expectedTotal
+                };
+            }
+        }
+
+        private static long ResolveExpectedTotal(HttpWebResponse response, long existing, bool resumed)
+        {
+            if (resumed)
+            {
+                string range = response.Headers["Content-Range"];
+                if (!String.IsNullOrWhiteSpace(range))
+                {
+                    Match match = Regex.Match(range, "/(\\d+)$");
+                    long total;
+                    if (match.Success && Int64.TryParse(match.Groups[1].Value, out total))
+                        return total;
+                }
+                return response.ContentLength >= 0 ? existing + response.ContentLength : -1;
+            }
+            return response.ContentLength;
+        }
+
+        private static void ValidateContentType(string contentType)
+        {
+            string value = (contentType ?? "").ToLowerInvariant();
+            if (value.Contains("text/html") ||
+                value.Contains("application/json") ||
+                value.Contains("text/plain"))
+                throw new InvalidDataException(
+                    "The download URL returned " + contentType + " instead of an installer file.");
+        }
+
+        private void VerifyAndCommit(DownloadResult result, string partPath, string finalPath)
+        {
+            status("verify");
+            string actual;
+            using (SHA256 sha = SHA256.Create())
+            using (FileStream stream = File.OpenRead(partPath))
+            {
+                actual = BitConverter.ToString(sha.ComputeHash(stream))
+                    .Replace("-", "").ToLowerInvariant();
+            }
+            result.Sha256 = actual;
+            bool matches = String.Equals(actual, config.ExpectedSha256, StringComparison.OrdinalIgnoreCase);
+            Log("SHA256 expected: " + config.ExpectedSha256);
+            Log("SHA256 actual: " + actual);
+            Log("SHA256 result: " + (matches ? "match" : "mismatch"));
+            if (!matches)
+            {
+                SafeDelete(partPath);
+                throw new InvalidDataException("SHA256 verification failed.");
+            }
+
+            SafeDelete(finalPath);
+            File.Move(partPath, finalPath);
+        }
+
+        private void SleepCancelable(int milliseconds)
+        {
+            int elapsed = 0;
+            while (elapsed < milliseconds)
+            {
+                ThrowIfCancelled();
+                Thread.Sleep(Math.Min(100, milliseconds - elapsed));
+                elapsed += 100;
+            }
+        }
+
+        private void ThrowIfCancelled()
+        {
+            if (cancelled) throw new OperationCanceledException("Download cancelled.");
+        }
+
+        private void Log(string message)
+        {
+            InstallerForm.AppendLog(logPath, message);
+        }
+
+        public static void SafeDelete(string path)
+        {
+            try { if (!String.IsNullOrWhiteSpace(path) && File.Exists(path)) File.Delete(path); }
+            catch { }
+        }
+    }
+
+    public sealed class InstallerForm : Form
+    {
+        private const string LogoBase64 = "__LOGO_WITHOUT_TEXT__";
+
+        private readonly Color bg0 = Color.FromArgb(11, 16, 32);
+        private readonly Color bg1 = Color.FromArgb(17, 24, 39);
+        private readonly Color card = Color.FromArgb(224, 16, 25, 47);
+        private readonly Color panel = Color.FromArgb(205, 12, 20, 39);
+        private readonly Color border = Color.FromArgb(24, 255, 255, 255);
+        private readonly Color text = Color.FromArgb(245, 248, 255);
+        private readonly Color muted = Color.FromArgb(157, 174, 202);
+        private readonly Color cyan = Color.FromArgb(34, 211, 238);
+        private readonly Color blue = Color.FromArgb(59, 130, 246);
+        private readonly Color purple = Color.FromArgb(139, 92, 246);
+        private readonly Color green = Color.FromArgb(52, 211, 153);
+        private readonly Color red = Color.FromArgb(248, 113, 113);
+
+        private Font fBrand;
+        private Font fTitle;
+        private Font fSubtitle;
+        private Font fBody;
+        private Font fBodyBold;
+        private Font fSmall;
+        private Font fPercent;
+        private Image logo;
+
+        private int screen;
+        private int language;
+        private bool detailsOpen;
+        private bool shortcut = true;
+        private bool installing;
+        private bool cancelled;
+        private int progressValue;
+        private long progressBytes;
+        private long progressTotal;
+        private double progressSpeed;
+        private string technicalError = "";
+        private string friendlyError = "";
+        private string installedVersion = "";
+        private string liveStatus = "";
+        private string hover = "";
+        private Point dragOrigin;
+        private bool dragging;
+
+        private Rectangle closeRect;
+        private Rectangle minRect;
+        private Rectangle langRect;
+        private readonly Dictionary<string, Rectangle> hits = new Dictionary<string, Rectangle>();
+        private readonly List<string> logTail = new List<string>();
+
+        private TextBox installPathBox;
+        private InstallerConfig config;
+        private ReliableDownloader downloader;
+        private Thread worker;
+        private string appRoot;
+        private string logPath;
+        private string partPath;
+        private string finalPath;
+        private string selectedInstallDir;
+
+        public InstallerForm()
+        {
+            InitializePaths();
+            InitializeWindow();
+            LoadConfig();
+            LoadLanguage();
+            AppendStartupLog();
+        }
+
+        private void InitializePaths()
+        {
+            appRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FluxTasksInstaller");
+            logPath = Path.Combine(appRoot, "logs", "install.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+            Directory.CreateDirectory(Path.Combine(appRoot, "downloads"));
+        }
+
+        private void InitializeWindow()
+        {
+            Text = "Flux Tasks Web Installer";
+            ClientSize = new Size(920, 650);
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.None;
+            BackColor = bg0;
+            DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            MinimumSize = new Size(920, 650);
+            MaximumSize = new Size(920, 650);
+            SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.UserPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw, true);
+
+            fBrand = new Font("Segoe UI", 12, FontStyle.Bold, GraphicsUnit.Pixel);
+            fTitle = new Font("Segoe UI", 32, FontStyle.Bold, GraphicsUnit.Pixel);
+            fSubtitle = new Font("Segoe UI", 16, FontStyle.Regular, GraphicsUnit.Pixel);
+            fBody = new Font("Segoe UI", 14, FontStyle.Regular, GraphicsUnit.Pixel);
+            fBodyBold = new Font("Segoe UI", 14, FontStyle.Bold, GraphicsUnit.Pixel);
+            fSmall = new Font("Segoe UI", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+            fPercent = new Font("Segoe UI", 46, FontStyle.Bold, GraphicsUnit.Pixel);
+
+            try
+            {
+                byte[] bytes = Convert.FromBase64String(LogoBase64);
+                using (MemoryStream stream = new MemoryStream(bytes))
+                using (Image source = Image.FromStream(stream))
+                    logo = TrimTransparent(new Bitmap(source));
+                using (Bitmap iconBitmap = new Bitmap(logo, new Size(64, 64)))
+                    Icon = Icon.FromHandle(iconBitmap.GetHicon());
+            }
+            catch { }
+
+            installPathBox = new TextBox();
+            installPathBox.BorderStyle = BorderStyle.None;
+            installPathBox.BackColor = Color.FromArgb(16, 25, 47);
+            installPathBox.ForeColor = text;
+            installPathBox.Font = fBody;
+            installPathBox.Location = new Point(185, 232);
+            installPathBox.Size = new Size(490, 24);
+            installPathBox.Text = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "Flux Tasks");
+            installPathBox.Visible = false;
+            Controls.Add(installPathBox);
+
+            closeRect = new Rectangle(868, 20, 28, 28);
+            minRect = new Rectangle(830, 20, 28, 28);
+            langRect = new Rectangle(688, 18, 126, 32);
+        }
+
+        private static Bitmap TrimTransparent(Bitmap source)
+        {
+            int left = source.Width;
+            int top = source.Height;
+            int right = -1;
+            int bottom = -1;
+            for (int y = 0; y < source.Height; y++)
+            {
+                for (int x = 0; x < source.Width; x++)
+                {
+                    if (source.GetPixel(x, y).A < 12) continue;
+                    if (x < left) left = x;
+                    if (x > right) right = x;
+                    if (y < top) top = y;
+                    if (y > bottom) bottom = y;
+                }
+            }
+            if (right < left || bottom < top) return source;
+            Rectangle crop = Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
+            Bitmap result = new Bitmap(crop.Width, crop.Height);
+            using (Graphics g = Graphics.FromImage(result))
+                g.DrawImage(source, new Rectangle(0, 0, result.Width, result.Height), crop, GraphicsUnit.Pixel);
+            source.Dispose();
+            return result;
+        }
+
+        private void LoadConfig()
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "installer-config.json");
+            try
+            {
+                config = InstallerConfig.Load(path);
+                installedVersion = config.Version;
+                string downloadDir = Path.Combine(appRoot, "downloads");
+                partPath = Path.Combine(downloadDir, config.FileName + ".part");
+                finalPath = Path.Combine(downloadDir, config.FileName);
+            }
+            catch (Exception ex)
+            {
+                config = new InstallerConfig();
+                technicalError = ex.ToString();
+                friendlyError = "config";
+                screen = 3;
+                AppendLog(logPath, "Config error: " + ex);
+            }
+        }
+
+        private void LoadLanguage()
+        {
+            string langPath = Path.Combine(appRoot, "language.txt");
+            try
+            {
+                string saved = File.Exists(langPath) ? File.ReadAllText(langPath).Trim() : "";
+                language = saved == "uk" ? 1 : saved == "en" ? 2 : 0;
+            }
+            catch { language = 0; }
+        }
+
+        private void SaveLanguage()
+        {
+            try
+            {
+                File.WriteAllText(
+                    Path.Combine(appRoot, "language.txt"),
+                    language == 1 ? "uk" : language == 2 ? "en" : "ru");
+            }
+            catch { }
+        }
+
+        private void AppendStartupLog()
+        {
+            AppendLog(logPath, "==================================================");
+            AppendLog(logPath, "Installer version: " + (config == null ? "unknown" : config.Version));
+            AppendLog(logPath, "OS version: " + Environment.OSVersion);
+            AppendLog(logPath, "64-bit OS: " + Environment.Is64BitOperatingSystem);
+            if (config != null)
+            {
+                AppendLog(logPath, "Download URL: " + config.PrimaryUrl);
+                AppendLog(logPath, "Mirror URL: " + config.MirrorUrl);
+            }
+        }
+
+        public static void AppendLog(string path, string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.AppendAllText(
+                    path,
+                    "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " +
+                    message + Environment.NewLine,
+                    Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            hits.Clear();
+
+            using (LinearGradientBrush background = new LinearGradientBrush(ClientRectangle, bg0, bg1, 35f))
+                g.FillRectangle(background, ClientRectangle);
+            DrawGlow(g, new Point(110, 90), 330, Color.FromArgb(50, 6, 182, 212));
+            DrawGlow(g, new Point(810, 560), 380, Color.FromArgb(48, 124, 58, 237));
+            DrawGlow(g, new Point(760, 70), 250, Color.FromArgb(28, 59, 130, 246));
+
+            Rectangle shell = new Rectangle(12, 12, 896, 626);
+            FillRound(g, shell, 24, card);
+            DrawRound(g, shell, 24, border, 1);
+            DrawHeader(g);
+
+            if (screen == 0) DrawWelcome(g);
+            else if (screen == 1) DrawOptions(g);
+            else if (screen == 2) DrawProgress(g);
+            else if (screen == 3) DrawError(g);
+            else DrawSuccess(g);
+        }
+
+        private void DrawHeader(Graphics g)
+        {
+            if (logo != null)
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(logo, new Rectangle(34, 24, 28, 28));
+            }
+            DrawText(g, "Flux Tasks", fBrand, text, new Rectangle(72, 25, 180, 28), TextFormatFlags.Left);
+
+            FillRound(g, langRect, 10, Color.FromArgb(110, 10, 18, 35));
+            DrawRound(g, langRect, 10, border, 1);
+            int width = langRect.Width / 3;
+            Rectangle active = new Rectangle(langRect.X + language * width + 3, langRect.Y + 3, width - 6, 26);
+            FillGradient(g, active, 8, blue, purple);
+            string[] langs = { "RU", "UA", "EN" };
+            for (int i = 0; i < 3; i++)
+            {
+                Rectangle r = new Rectangle(langRect.X + i * width, langRect.Y, width, langRect.Height);
+                DrawText(g, langs[i], fSmall, i == language ? Color.White : muted, r, TextFormatFlags.HorizontalCenter);
+                hits["lang" + i] = r;
+            }
+
+            DrawWindowButton(g, minRect, "min");
+            DrawWindowButton(g, closeRect, "close");
+        }
+
+        private void DrawWindowButton(Graphics g, Rectangle r, string kind)
+        {
+            if (hover == kind) FillRound(g, r, 10, kind == "close" ? Color.FromArgb(80, 239, 68, 68) : Color.FromArgb(48, 255, 255, 255));
+            if (kind == "min")
+                using (Pen p = new Pen(text, 2)) g.DrawLine(p, r.X + 8, r.Y + 15, r.Right - 8, r.Y + 15);
+            else
+                using (Pen p = new Pen(text, 2))
+                {
+                    g.DrawLine(p, r.X + 9, r.Y + 9, r.Right - 9, r.Bottom - 9);
+                    g.DrawLine(p, r.Right - 9, r.Y + 9, r.X + 9, r.Bottom - 9);
+                }
+            hits[kind] = r;
+        }
+
+        private void DrawWelcome(Graphics g)
+        {
+            installPathBox.Visible = false;
+            Rectangle main = new Rectangle(86, 82, 748, 490);
+            FillRound(g, main, 24, panel);
+            DrawRound(g, main, 24, border, 1);
+
+            DrawBadge(g, new Rectangle(122, 118, 196, 30), "FLUX TASKS INSTALLER");
+            DrawText(g, T("welcome"), fTitle, text, new Rectangle(122, 166, 650, 52), TextFormatFlags.Left);
+            DrawText(g, "Premium Offline Project Manager", fSubtitle, muted, new Rectangle(122, 220, 600, 32), TextFormatFlags.Left);
+
+            string[] benefits = { T("local"), T("offline"), "SQLite workspace", "GitHub-ready workflow" };
+            for (int i = 0; i < benefits.Length; i++)
+            {
+                int x = i % 2 == 0 ? 122 : 462;
+                int y = 282 + (i / 2) * 54;
+                DrawBenefit(g, new Rectangle(x, y, 300, 40), benefits[i]);
+            }
+
+            DrawButton(g, "install", new Rectangle(122, 430, 190, 48), T("install"), true);
+            DrawButton(g, "advanced", new Rectangle(326, 430, 190, 48), T("advanced"), false);
+            DrawButton(g, "cancel", new Rectangle(530, 430, 190, 48), T("cancel"), false);
+            DrawText(g, T("downloadNote"), fSmall, muted, new Rectangle(122, 500, 610, 24), TextFormatFlags.Left);
+        }
+
+        private void DrawOptions(Graphics g)
+        {
+            Rectangle main = new Rectangle(86, 82, 748, 490);
+            FillRound(g, main, 24, panel);
+            DrawRound(g, main, 24, border, 1);
+            DrawText(g, T("advancedTitle"), fTitle, text, new Rectangle(122, 118, 620, 50), TextFormatFlags.Left);
+            DrawText(g, T("installFolder"), fBodyBold, text, new Rectangle(122, 194, 400, 28), TextFormatFlags.Left);
+
+            Rectangle input = new Rectangle(122, 226, 590, 42);
+            FillRound(g, input, 12, Color.FromArgb(255, 16, 25, 47));
+            DrawRound(g, input, 12, border, 1);
+            installPathBox.Visible = true;
+            installPathBox.Location = new Point(140, 236);
+            installPathBox.Width = 540;
+
+            DrawToggle(g, "shortcut", new Rectangle(122, 298, 590, 52), T("shortcut"), shortcut);
+            DrawInfoRow(g, new Rectangle(122, 372, 590, 54), T("version"), config == null ? "—" : config.Version);
+            DrawButton(g, "back", new Rectangle(122, 458, 160, 48), T("back"), false);
+            DrawButton(g, "install", new Rectangle(536, 458, 176, 48), T("install"), true);
+        }
+
+        private void DrawProgress(Graphics g)
+        {
+            installPathBox.Visible = false;
+            Rectangle main = new Rectangle(86, 82, 748, 490);
+            FillRound(g, main, 24, panel);
+            DrawRound(g, main, 24, border, 1);
+
+            DrawText(g, T("installing"), fTitle, text, new Rectangle(122, 112, 480, 50), TextFormatFlags.Left);
+            DrawText(g, progressValue + "%", fPercent, text, new Rectangle(650, 104, 130, 58), TextFormatFlags.Right);
+            DrawProgressBar(g, new Rectangle(122, 176, 590, 14), progressValue);
+            DrawText(g, CurrentStage(), fBodyBold, text, new Rectangle(122, 202, 390, 28), TextFormatFlags.Left);
+            DrawText(g, FormatSize(progressBytes) + " / " + FormatSize(progressTotal) + "  •  " + FormatSpeed(progressSpeed),
+                fSmall, muted, new Rectangle(480, 204, 232, 24), TextFormatFlags.Right);
+
+            DrawStages(g, new Rectangle(122, 246, 250, 180));
+            DrawTerminal(g, new Rectangle(394, 246, 318, 180));
+            DrawButton(g, "cancelDownload", new Rectangle(122, 458, 176, 48), T("cancel"), false);
+            DrawButton(g, "openLog", new Rectangle(536, 458, 176, 48), T("openLog"), false);
+        }
+
+        private void DrawError(Graphics g)
+        {
+            installPathBox.Visible = false;
+            Rectangle main = new Rectangle(86, 82, 748, 490);
+            FillRound(g, main, 24, panel);
+            DrawRound(g, main, 24, border, 1);
+            DrawStatusIcon(g, new Point(152, 148), false);
+            DrawText(g, T("errorTitle"), fTitle, text, new Rectangle(196, 118, 560, 46), TextFormatFlags.Left);
+            DrawText(g, ErrorDescription(), fBody, muted, new Rectangle(196, 168, 520, 48), TextFormatFlags.Left | TextFormatFlags.WordBreak);
+
+            Rectangle detail = new Rectangle(122, 246, 590, detailsOpen ? 128 : 48);
+            FillRound(g, detail, 14, Color.FromArgb(180, 10, 18, 35));
+            DrawRound(g, detail, 14, border, 1);
+            DrawText(g, T("details") + (detailsOpen ? "  ▲" : "  ▼"), fBodyBold, text,
+                new Rectangle(140, detail.Y + 12, 540, 24), TextFormatFlags.Left);
+            hits["details"] = detail;
+            if (detailsOpen)
+            {
+                string value = String.IsNullOrWhiteSpace(technicalError) ? T("unknownError") : technicalError;
+                DrawText(g, value, fSmall, muted, new Rectangle(140, detail.Y + 48, 548, 66),
+                    TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+            }
+
+            DrawButton(g, "retry", new Rectangle(122, 458, 176, 48), T("retry"), true);
+            DrawButton(g, "openLog", new Rectangle(312, 458, 176, 48), T("openLog"), false);
+            DrawButton(g, "cancel", new Rectangle(502, 458, 176, 48), T("cancel"), false);
+        }
+
+        private void DrawSuccess(Graphics g)
+        {
+            installPathBox.Visible = false;
+            Rectangle main = new Rectangle(86, 82, 748, 490);
+            FillRound(g, main, 24, panel);
+            DrawRound(g, main, 24, border, 1);
+            DrawStatusIcon(g, new Point(460, 176), true);
+            DrawText(g, T("successTitle"), fTitle, text, new Rectangle(170, 238, 580, 48), TextFormatFlags.HorizontalCenter);
+            DrawText(g, T("version") + ": " + installedVersion, fBody, muted,
+                new Rectangle(240, 294, 440, 28), TextFormatFlags.HorizontalCenter);
+            DrawButton(g, "launch", new Rectangle(230, 382, 230, 50), T("launch"), true);
+            DrawButton(g, "done", new Rectangle(474, 382, 170, 50), T("done"), false);
+        }
+
+        private void DrawBadge(Graphics g, Rectangle rect, string value)
+        {
+            FillRound(g, rect, 15, Color.FromArgb(38, 34, 211, 238));
+            DrawRound(g, rect, 15, Color.FromArgb(80, 34, 211, 238), 1);
+            DrawText(g, value, fSmall, cyan, rect, TextFormatFlags.HorizontalCenter);
+        }
+
+        private void DrawBenefit(Graphics g, Rectangle rect, string value)
+        {
+            FillRound(g, rect, 12, Color.FromArgb(100, 15, 24, 45));
+            DrawRound(g, rect, 12, border, 1);
+            using (SolidBrush b = new SolidBrush(cyan)) g.FillEllipse(b, rect.X + 14, rect.Y + 15, 10, 10);
+            DrawText(g, value, fBody, text, new Rectangle(rect.X + 36, rect.Y + 8, rect.Width - 48, 26), TextFormatFlags.Left);
+        }
+
+        private void DrawToggle(Graphics g, string id, Rectangle rect, string value, bool enabled)
+        {
+            FillRound(g, rect, 14, Color.FromArgb(100, 15, 24, 45));
+            DrawRound(g, rect, 14, border, 1);
+            DrawText(g, value, fBody, text, new Rectangle(rect.X + 18, rect.Y + 13, rect.Width - 96, 26), TextFormatFlags.Left);
+            Rectangle toggle = new Rectangle(rect.Right - 66, rect.Y + 12, 48, 28);
+            FillRound(g, toggle, 14, enabled ? blue : Color.FromArgb(70, 148, 163, 184));
+            using (SolidBrush b = new SolidBrush(Color.White))
+                g.FillEllipse(b, enabled ? toggle.Right - 24 : toggle.X + 4, toggle.Y + 4, 20, 20);
+            hits[id] = rect;
+        }
+
+        private void DrawInfoRow(Graphics g, Rectangle rect, string label, string value)
+        {
+            FillRound(g, rect, 14, Color.FromArgb(100, 15, 24, 45));
+            DrawRound(g, rect, 14, border, 1);
+            DrawText(g, label, fBody, muted, new Rectangle(rect.X + 18, rect.Y + 14, 250, 26), TextFormatFlags.Left);
+            DrawText(g, value, fBodyBold, text, new Rectangle(rect.Right - 230, rect.Y + 14, 212, 26), TextFormatFlags.Right);
+        }
+
+        private void DrawButton(Graphics g, string id, Rectangle rect, string label, bool primary)
+        {
+            if (primary) FillGradient(g, rect, 14, blue, purple);
+            else FillRound(g, rect, 14, hover == id ? Color.FromArgb(48, 255, 255, 255) : Color.FromArgb(24, 255, 255, 255));
+            DrawRound(g, rect, 14, primary ? Color.FromArgb(80, 255, 255, 255) : border, 1);
+            DrawText(g, label, fBodyBold, text, rect, TextFormatFlags.HorizontalCenter);
+            hits[id] = rect;
+        }
+
+        private void DrawProgressBar(Graphics g, Rectangle rect, int value)
+        {
+            FillRound(g, rect, 7, Color.FromArgb(80, 51, 65, 85));
+            int width = Math.Max(value > 0 ? 14 : 0, rect.Width * Math.Max(0, Math.Min(100, value)) / 100);
+            if (width > 0) FillGradient(g, new Rectangle(rect.X, rect.Y, width, rect.Height), 7, blue, purple);
+        }
+
+        private void DrawStages(Graphics g, Rectangle rect)
+        {
+            string[] stages = {
+                T("prepare"), T("download"), T("verify"), T("unpack"), T("finish")
+            };
+            int active = StageIndex();
+            for (int i = 0; i < stages.Length; i++)
+            {
+                int y = rect.Y + i * 34;
+                Color c = i < active ? green : i == active ? cyan : Color.FromArgb(90, 148, 163, 184);
+                using (Pen p = new Pen(c, 2)) g.DrawEllipse(p, rect.X, y + 4, 14, 14);
+                if (i < active)
+                {
+                    using (Pen p = new Pen(c, 2))
+                    {
+                        g.DrawLine(p, rect.X + 4, y + 11, rect.X + 7, y + 14);
+                        g.DrawLine(p, rect.X + 7, y + 14, rect.X + 12, y + 8);
+                    }
+                }
+                DrawText(g, stages[i], i == active ? fBodyBold : fBody, i <= active ? text : muted,
+                    new Rectangle(rect.X + 28, y, rect.Width - 30, 26), TextFormatFlags.Left);
+            }
+        }
+
+        private void DrawTerminal(Graphics g, Rectangle rect)
+        {
+            FillRound(g, rect, 14, Color.FromArgb(230, 5, 10, 22));
+            DrawRound(g, rect, 14, border, 1);
+            DrawText(g, T("installLog"), fSmall, muted, new Rectangle(rect.X + 16, rect.Y + 12, rect.Width - 32, 22), TextFormatFlags.Left);
+            lock (logTail)
+            {
+                int count = Math.Min(6, logTail.Count);
+                for (int i = 0; i < count; i++)
+                {
+                    string line = logTail[logTail.Count - count + i];
+                    DrawText(g, line, fSmall, i == count - 1 ? cyan : Color.FromArgb(145, 163, 184),
+                        new Rectangle(rect.X + 16, rect.Y + 42 + i * 20, rect.Width - 30, 20),
+                        TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+                }
+            }
+        }
+
+        public void SetPreviewScreen(int value)
+        {
+            screen = Math.Max(0, Math.Min(4, value));
+            if (screen == 2)
+            {
+                liveStatus = "download";
+                progressValue = 64;
+                progressBytes = 74711040;
+                progressTotal = 116768971;
+                progressSpeed = 5242880;
+                logTail.Clear();
+                logTail.Add("[10:24:12] Download started");
+                logTail.Add("[10:24:20] Primary source connected");
+                logTail.Add("[10:24:31] Downloading components");
+            }
+            else if (screen == 3)
+            {
+                friendlyError = "network";
+                technicalError = "WebException: The underlying connection was closed unexpectedly.";
+            }
+            else if (screen == 4)
+            {
+                installedVersion = config == null ? "1.1.20" : config.Version;
+            }
+            Invalidate();
+        }
+
+        private void DrawStatusIcon(Graphics g, Point center, bool success)
+        {
+            Color c = success ? green : red;
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(28, c))) g.FillEllipse(b, center.X - 38, center.Y - 38, 76, 76);
+            using (Pen p = new Pen(c, 4))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                g.DrawEllipse(p, center.X - 34, center.Y - 34, 68, 68);
+                if (success)
+                {
+                    g.DrawLine(p, center.X - 15, center.Y, center.X - 4, center.Y + 12);
+                    g.DrawLine(p, center.X - 4, center.Y + 12, center.X + 19, center.Y - 14);
+                }
+                else
+                {
+                    g.DrawLine(p, center.X - 13, center.Y - 13, center.X + 13, center.Y + 13);
+                    g.DrawLine(p, center.X + 13, center.Y - 13, center.X - 13, center.Y + 13);
+                }
+            }
+        }
+
+        private void DrawGlow(Graphics g, Point center, int diameter, Color color)
+        {
+            using (GraphicsPath path = new GraphicsPath())
+            {
+                Rectangle r = new Rectangle(center.X - diameter / 2, center.Y - diameter / 2, diameter, diameter);
+                path.AddEllipse(r);
+                using (PathGradientBrush brush = new PathGradientBrush(path))
+                {
+                    brush.CenterColor = color;
+                    brush.SurroundColors = new Color[] { Color.FromArgb(0, color) };
+                    g.FillEllipse(brush, r);
+                }
+            }
+        }
+
+        private static GraphicsPath Rounded(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private static void FillRound(Graphics g, Rectangle rect, int radius, Color color)
+        {
+            using (GraphicsPath path = Rounded(rect, radius))
+            using (SolidBrush brush = new SolidBrush(color)) g.FillPath(brush, path);
+        }
+
+        private static void DrawRound(Graphics g, Rectangle rect, int radius, Color color, int width)
+        {
+            using (GraphicsPath path = Rounded(rect, radius))
+            using (Pen pen = new Pen(color, width)) g.DrawPath(pen, path);
+        }
+
+        private static void FillGradient(Graphics g, Rectangle rect, int radius, Color from, Color to)
+        {
+            using (GraphicsPath path = Rounded(rect, Math.Min(radius, Math.Min(rect.Width, rect.Height) / 2)))
+            using (LinearGradientBrush brush = new LinearGradientBrush(rect, from, to, 0f))
+                g.FillPath(brush, path);
+        }
+
+        private static void DrawText(Graphics g, string value, Font font, Color color, Rectangle rect, TextFormatFlags flags)
+        {
+            TextRenderer.DrawText(
+                g,
+                value ?? "",
+                font,
+                rect,
+                color,
+                flags | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (dragging)
+            {
+                Point screenPoint = PointToScreen(e.Location);
+                Location = new Point(screenPoint.X - dragOrigin.X, screenPoint.Y - dragOrigin.Y);
+                return;
+            }
+            string next = "";
+            foreach (KeyValuePair<string, Rectangle> hit in hits)
+                if (hit.Value.Contains(e.Location)) { next = hit.Key; break; }
+            if (next != hover) { hover = next; Invalidate(); }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Y < 64 && !closeRect.Contains(e.Location) && !minRect.Contains(e.Location) && !langRect.Contains(e.Location))
+            {
+                dragging = true;
+                dragOrigin = e.Location;
+                return;
+            }
+            string action = "";
+            foreach (KeyValuePair<string, Rectangle> hit in hits)
+                if (hit.Value.Contains(e.Location)) { action = hit.Key; break; }
+            HandleAction(action);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            dragging = false;
+            base.OnMouseUp(e);
+        }
+
+        private void HandleAction(string action)
+        {
+            if (action == "close" || action == "cancel") { Close(); return; }
+            if (action == "min") { WindowState = FormWindowState.Minimized; return; }
+            if (action.StartsWith("lang"))
+            {
+                language = Int32.Parse(action.Substring(4));
+                SaveLanguage();
+                Invalidate();
+                return;
+            }
+            if (action == "advanced") { screen = 1; Invalidate(); return; }
+            if (action == "back") { screen = 0; Invalidate(); return; }
+            if (action == "shortcut") { shortcut = !shortcut; Invalidate(); return; }
+            if (action == "install") { StartInstall(false); return; }
+            if (action == "cancelDownload") { CancelInstall(); return; }
+            if (action == "openLog") { OpenLog(); return; }
+            if (action == "details") { detailsOpen = !detailsOpen; Invalidate(); return; }
+            if (action == "retry") { StartInstall(true); return; }
+            if (action == "launch") { LaunchInstalled(); Close(); return; }
+            if (action == "done") { Close(); return; }
+        }
+
+        private void StartInstall(bool cleanRetry)
+        {
+            if (config == null || installing) return;
+            if (cleanRetry)
+            {
+                ReliableDownloader.SafeDelete(partPath);
+                ReliableDownloader.SafeDelete(finalPath);
+            }
+            cancelled = false;
+            installing = true;
+            selectedInstallDir = installPathBox.Text.Trim();
+            detailsOpen = false;
+            technicalError = "";
+            friendlyError = "";
+            liveStatus = "prepare";
+            progressValue = 0;
+            progressBytes = 0;
+            progressTotal = 0;
+            logTail.Clear();
+            AddUiLog(T("prepare"));
+            screen = 2;
+            Invalidate();
+
+            downloader = new ReliableDownloader(config, logPath, OnDownloadProgress, OnDownloadStatus);
+            worker = new Thread(InstallWorker);
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        private void InstallWorker()
+        {
+            try
+            {
+                AppendLog(logPath, "Installation started.");
+                liveStatus = "download";
+                AddUiLog("Download started");
+                DownloadResult result = downloader.Download(partPath, finalPath);
+                AddUiLog("Download verified");
+
+                liveStatus = "unpack";
+                SafeInvalidate();
+                AppendLog(logPath, "Starting installer: " + result.Path);
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = result.Path;
+                start.Arguments = "/S /D=" + selectedInstallDir;
+                start.UseShellExecute = true;
+                using (Process process = Process.Start(start))
+                {
+                    if (process == null) throw new InvalidOperationException("Failed to start the downloaded installer.");
+                    while (!process.WaitForExit(250))
+                    {
+                        if (cancelled)
+                        {
+                            try { process.Kill(); } catch { }
+                            throw new OperationCanceledException();
+                        }
+                    }
+                    if (process.ExitCode != 0)
+                        throw new InvalidOperationException("Installer exited with code " + process.ExitCode + ".");
+                }
+
+                if (shortcut) CreateShortcut(selectedInstallDir);
+                liveStatus = "finish";
+                AddUiLog(T("finish"));
+                AppendLog(logPath, "Installation completed successfully.");
+                installing = false;
+                SafeUi(delegate { screen = 4; Invalidate(); });
+            }
+            catch (OperationCanceledException)
+            {
+                installing = false;
+                AppendLog(logPath, "Installation cancelled by user.");
+                ReliableDownloader.SafeDelete(partPath);
+                SafeUi(delegate { screen = 0; Invalidate(); });
+            }
+            catch (Exception ex)
+            {
+                installing = false;
+                technicalError = ex.ToString();
+                friendlyError = ClassifyError(ex);
+                AppendLog(logPath, "Installation failed: " + ex);
+                ReliableDownloader.SafeDelete(partPath);
+                SafeUi(delegate { screen = 3; Invalidate(); });
+            }
+        }
+
+        private void OnDownloadProgress(int percent, long bytes, long total, double speed)
+        {
+            progressValue = percent;
+            progressBytes = bytes;
+            progressTotal = total;
+            if (speed > 0) progressSpeed = speed;
+            SafeInvalidate();
+        }
+
+        private void OnDownloadStatus(string value)
+        {
+            if (value == "mirror")
+            {
+                liveStatus = "mirror";
+                AddUiLog(T("mirror"));
+            }
+            else if (value == "verify")
+            {
+                liveStatus = "verify";
+                AddUiLog(T("verify"));
+            }
+            else if (value.StartsWith("retry:"))
+            {
+                liveStatus = "download";
+                AddUiLog(T("retrying") + " " + value.Substring(6));
+            }
+            SafeInvalidate();
+        }
+
+        private void AddUiLog(string value)
+        {
+            lock (logTail)
+            {
+                logTail.Add("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + value);
+                if (logTail.Count > 30) logTail.RemoveAt(0);
+            }
+            SafeInvalidate();
+        }
+
+        private void CancelInstall()
+        {
+            if (!installing) return;
+            cancelled = true;
+            if (downloader != null) downloader.Cancel();
+        }
+
+        private void OpenLog()
+        {
+            try
+            {
+                if (!File.Exists(logPath)) File.WriteAllText(logPath, "", Encoding.UTF8);
+                Process.Start(new ProcessStartInfo(logPath) { UseShellExecute = true });
+            }
+            catch (Exception ex) { AppendLog(logPath, "Could not open log: " + ex); }
+        }
+
+        private void LaunchInstalled()
+        {
+            string exe = Path.Combine(installPathBox.Text, "Flux Tasks.exe");
+            try
+            {
+                if (File.Exists(exe)) Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true });
+            }
+            catch (Exception ex) { AppendLog(logPath, "Could not launch app: " + ex); }
+        }
+
+        private void CreateShortcut(string installDir)
+        {
+            try
+            {
+                string shortcutPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    "Flux Tasks.lnk");
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                dynamic shell = Activator.CreateInstance(shellType);
+                dynamic link = shell.CreateShortcut(shortcutPath);
+                link.TargetPath = Path.Combine(installDir, "Flux Tasks.exe");
+                link.WorkingDirectory = installDir;
+                link.Save();
+                AppendLog(logPath, "Desktop shortcut created: " + shortcutPath);
+            }
+            catch (Exception ex) { AppendLog(logPath, "Shortcut creation failed: " + ex); }
+        }
+
+        private string ClassifyError(Exception ex)
+        {
+            string value = ex.ToString().ToLowerInvariant();
+            if (value.Contains("sha256") || value.Contains("checksum")) return "hash";
+            if (value.Contains("config")) return "config";
+            if (value.Contains("cancel")) return "cancel";
+            if (value.Contains("webexception") || value.Contains("connection") ||
+                value.Contains("соединение") || value.Contains("timeout") ||
+                value.Contains("http")) return "network";
+            return "generic";
+        }
+
+        private string ErrorDescription()
+        {
+            if (friendlyError == "network") return T("networkError");
+            if (friendlyError == "hash") return T("hashError");
+            if (friendlyError == "config") return T("configError");
+            return T("genericError");
+        }
+
+        private int StageIndex()
+        {
+            if (liveStatus == "prepare") return 0;
+            if (liveStatus == "download" || liveStatus == "mirror") return 1;
+            if (liveStatus == "verify") return 2;
+            if (liveStatus == "unpack") return 3;
+            return 4;
+        }
+
+        private string CurrentStage()
+        {
+            if (liveStatus == "mirror") return T("mirror");
+            if (liveStatus == "download") return T("download");
+            if (liveStatus == "verify") return T("verify");
+            if (liveStatus == "unpack") return T("unpack");
+            if (liveStatus == "finish") return T("finish");
+            return T("prepare");
+        }
+
+        private static string FormatSize(long bytes)
+        {
+            if (bytes < 0) return "—";
+            if (bytes >= 1024L * 1024L * 1024L) return (bytes / (1024d * 1024d * 1024d)).ToString("0.00") + " GB";
+            if (bytes >= 1024L * 1024L) return (bytes / (1024d * 1024d)).ToString("0.0") + " MB";
+            if (bytes >= 1024L) return (bytes / 1024d).ToString("0.0") + " KB";
+            return bytes + " B";
+        }
+
+        private static string FormatSpeed(double bytes)
+        {
+            return bytes <= 0 ? "—" : FormatSize((long)bytes) + "/s";
+        }
+
+        private void SafeInvalidate()
+        {
+            SafeUi(delegate { Invalidate(); });
+        }
+
+        private void SafeUi(MethodInvoker action)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                if (InvokeRequired) BeginInvoke(action);
+                else action();
+            }
+            catch { }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (installing)
+            {
+                CancelInstall();
+                e.Cancel = true;
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
+        private string T(string key)
+        {
+            string[][] values = Translations;
+            int index;
+            if (!TranslationKeys.TryGetValue(key, out index)) return key;
+            return values[language][index];
+        }
+
+        private static readonly Dictionary<string, int> TranslationKeys = new Dictionary<string, int>
+        {
+            {"welcome",0},{"local",1},{"offline",2},{"install",3},{"advanced",4},{"cancel",5},
+            {"downloadNote",6},{"advancedTitle",7},{"installFolder",8},{"shortcut",9},{"version",10},
+            {"back",11},{"installing",12},{"prepare",13},{"download",14},{"verify",15},{"unpack",16},
+            {"finish",17},{"installLog",18},{"openLog",19},{"mirror",20},{"retrying",21},
+            {"errorTitle",22},{"networkError",23},{"hashError",24},{"configError",25},{"genericError",26},
+            {"details",27},{"unknownError",28},{"retry",29},{"successTitle",30},{"launch",31},{"done",32}
+        };
+
+        private static readonly string[][] Translations = new string[][]
+        {
+            new string[]
+            {
+                "Добро пожаловать в Flux Tasks","Локальное хранение данных","Offline-first рабочее пространство",
+                "Установить","Дополнительно","Отмена","Будет загружена проверенная версия установщика",
+                "Дополнительные параметры","Папка установки","Создать ярлык на рабочем столе","Версия","Назад",
+                "Установка Flux Tasks","Подготовка установки","Загрузка компонентов","Проверка целостности",
+                "Распаковка файлов","Завершение установки","Лог установки","Открыть лог",
+                "Основной сервер недоступен, пробуем резервный источник...","Повторная попытка",
+                "Не удалось установить Flux Tasks","Соединение было прервано во время загрузки установочных файлов.",
+                "Проверка целостности не пройдена. Загруженный файл был удален.",
+                "Конфигурация установщика повреждена или отсутствует.",
+                "Во время установки произошла ошибка. Технические детали доступны ниже.","Подробнее",
+                "Технические детали отсутствуют.","Повторить","Flux Tasks успешно установлен",
+                "Запустить Flux Tasks","Готово"
+            },
+            new string[]
+            {
+                "Ласкаво просимо до Flux Tasks","Локальне зберігання даних","Offline-first робочий простір",
+                "Встановити","Додатково","Скасувати","Буде завантажено перевірену версію інсталятора",
+                "Додаткові параметри","Папка встановлення","Створити ярлик на робочому столі","Версія","Назад",
+                "Встановлення Flux Tasks","Підготовка встановлення","Завантаження компонентів","Перевірка цілісності",
+                "Розпакування файлів","Завершення встановлення","Журнал встановлення","Відкрити журнал",
+                "Основний сервер недоступний, пробуємо резервне джерело...","Повторна спроба",
+                "Не вдалося встановити Flux Tasks","З'єднання було перервано під час завантаження інсталяційних файлів.",
+                "Перевірку цілісності не пройдено. Завантажений файл видалено.",
+                "Конфігурація інсталятора пошкоджена або відсутня.",
+                "Під час встановлення сталася помилка. Технічні деталі доступні нижче.","Докладніше",
+                "Технічні деталі відсутні.","Повторити","Flux Tasks успішно встановлено",
+                "Запустити Flux Tasks","Готово"
+            },
+            new string[]
+            {
+                "Welcome to Flux Tasks","Local data storage","Offline-first workspace",
+                "Install","Advanced","Cancel","A verified installer package will be downloaded",
+                "Advanced options","Installation folder","Create a desktop shortcut","Version","Back",
+                "Installing Flux Tasks","Preparing installation","Downloading components","Verifying integrity",
+                "Extracting files","Finishing installation","Installation log","Open log",
+                "Primary server unavailable, trying the backup source...","Retry attempt",
+                "Flux Tasks could not be installed","The connection was interrupted while downloading installation files.",
+                "Integrity verification failed. The downloaded file was removed.",
+                "The installer configuration is missing or invalid.",
+                "An error occurred during installation. Technical details are available below.","Details",
+                "No technical details are available.","Retry","Flux Tasks was installed successfully",
+                "Launch Flux Tasks","Done"
+            }
+        };
+    }
+
+    internal static class Program
+    {
+        [DllImport("shcore.dll")]
+        private static extern int SetProcessDpiAwareness(int awareness);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
+        [STAThread]
+        private static void Main(string[] args)
+        {
+            try { SetProcessDpiAwareness(2); }
+            catch { try { SetProcessDPIAware(); } catch { } }
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            if (args.Length >= 3 && args[0] == "--download-only")
+            {
+                try
+                {
+                    InstallerConfig testConfig = InstallerConfig.Load(args[1]);
+                    string outputDir = args[2];
+                    Directory.CreateDirectory(outputDir);
+                    string testLog = Path.Combine(outputDir, "download-test.log");
+                    string testPart = Path.Combine(outputDir, testConfig.FileName + ".part");
+                    string testFinal = Path.Combine(outputDir, testConfig.FileName);
+                    ReliableDownloader testDownloader = new ReliableDownloader(
+                        testConfig, testLog,
+                        delegate(int p, long b, long t, double s) { },
+                        delegate(string value) { InstallerForm.AppendLog(testLog, "Status: " + value); });
+                    testDownloader.Download(testPart, testFinal);
+                    Environment.ExitCode = 0;
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        string outputDir = args.Length >= 3 ? args[2] : AppDomain.CurrentDomain.BaseDirectory;
+                        InstallerForm.AppendLog(Path.Combine(outputDir, "download-test.log"), "Self-test error: " + ex);
+                    }
+                    catch { }
+                    Environment.ExitCode = 1;
+                }
+                return;
+            }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            InstallerForm form = new InstallerForm();
+            if (args.Length >= 2 && args[0] == "--render-preview")
+            {
+                int previewScreen;
+                if (args.Length >= 3 && Int32.TryParse(args[2], out previewScreen))
+                    form.SetPreviewScreen(previewScreen);
+                form.Show();
+                Application.DoEvents();
+                using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
+                {
+                    form.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                    bitmap.Save(args[1], System.Drawing.Imaging.ImageFormat.Png);
+                }
+                form.Close();
+                return;
+            }
+            Application.Run(form);
+        }
+    }
+}

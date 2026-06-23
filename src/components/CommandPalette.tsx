@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import * as Icons from 'lucide-react';
+import { getIconComponent } from '../iconRegistry';
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -173,9 +174,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
   }).slice(0, 8); // Limit to top 8 items for fast scrolling and layout stability
 
   const getIcon = (name: string, cls: string = "w-4 h-4 text-slate-400") => {
-    const LucideIcon = (Icons as any)[name];
-    if (LucideIcon) return <LucideIcon className={cls} />;
-    return <Icons.FileText className={cls} />;
+    const Icon = getIconComponent(name, Icons.FileText);
+    return <Icon className={cls} />;
   };
 
   const getBadgeBg = (type: string) => {

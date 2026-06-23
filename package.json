@@ -2,7 +2,7 @@
   "name": "flux-tasks",
   "productName": "Flux Tasks",
   "private": true,
-  "version": "1.1.20",
+  "version": "1.1.21",
   "type": "commonjs",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -10,9 +10,12 @@
     "build:frontend": "vite build",
     "build:electron": "esbuild electron/main.ts --bundle --platform=node --external:electron --outfile=dist-electron/main.js && esbuild electron/preload.ts --bundle --platform=node --external:electron --outfile=dist-electron/preload.js",
     "build": "npm run build:frontend && npm run build:electron && electron-builder --win",
+    "build:web-installer": "node scripts/build-installer.js",
+    "test:web-installer": "npm run build:web-installer && node scripts/test-web-installer.js",
     "package": "npm run build",
     "release": "node scripts/release.js",
     "upload-release": "node scripts/upload-release.js",
+    "upload-web-package": "node scripts/upload-release.js --setup-only",
     "clean": "rm -rf dist dist-electron release",
     "lint": "tsc --noEmit"
   },

@@ -3,6 +3,7 @@ import { useStore } from '../store';
 import { getTranslation } from '../localization';
 import * as Icons from 'lucide-react';
 import { Task, Project, Release } from '../types';
+import { getIconComponent } from '../iconRegistry';
 
 const EmptyIllustration: React.FC = () => (
   <svg viewBox="0 0 200 150" fill="none" className="w-40 h-32 mx-auto text-slate-600 opacity-60">
@@ -69,9 +70,21 @@ export const Dashboard: React.FC = () => {
 
   const stats = useMemo(() => {
     const total = safeTasks.length;
-    const active = safeTasks.filter(t => t.status === 'in_progress' || t.status === 'testing').length;
-    const completed = safeTasks.filter(t => t.status === 'completed').length;
-    const pending = safeTasks.filter(t => t.status === 'pending' || t.status === 'planned').length;
+    let active = 0;
+    let completed = 0;
+    let pending = 0;
+    const focusTasks: Task[] = [];
+    const tasksById = new Map<string, Task>();
+
+    for (const task of safeTasks) {
+      tasksById.set(task.id, task);
+      if (task.status === 'in_progress' || task.status === 'testing') active += 1;
+      if (task.status === 'completed') completed += 1;
+      if (task.status === 'pending' || task.status === 'planned') pending += 1;
+      if (focusTasks.length < 4 && (task.status === 'in_progress' || task.status === 'pending')) {
+        focusTasks.push(task);
+      }
+    }
     const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
     // Upcoming releases sorted by date
@@ -80,15 +93,10 @@ export const Dashboard: React.FC = () => {
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
       .slice(0, 3);
 
-    // Limit active/focus tasks for dashboard view (max 4)
-    const focusTasks = safeTasks
-      .filter(t => t.status === 'in_progress' || t.status === 'pending')
-      .slice(0, 4);
-
     const recent: any[] = [];
     for (const h of safeActivityLogs) {
       if (recent.length >= 4) break;
-      const t = safeTasks.find(x => x.id === h.taskId);
+      const t = tasksById.get(h.taskId);
       if (t) {
         recent.push({
           task: t,
@@ -326,9 +334,8 @@ export const Dashboard: React.FC = () => {
                         <div className="flex items-center gap-2.5 min-w-0">
                           <span className="shrink-0" style={{ color: hexColor }}>
                             {(() => {
-                              const LucideIcon = (Icons as any)[p.icon];
-                              if (LucideIcon) return <LucideIcon className="w-5 h-5" />;
-                              return <Icons.Folder className="w-5 h-5 text-slate-400" />;
+                              const Icon = getIconComponent(p.icon, Icons.Folder);
+                              return <Icon className="w-5 h-5" />;
                             })()}
                           </span>
                           <div className="min-w-0">

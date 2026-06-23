@@ -172,6 +172,7 @@ async function startUpload() {
   console.log('=== Автоматический загрузчик файлов релиза Flux Tasks ===\n');
 
   try {
+    const setupOnly = process.argv.includes('--setup-only');
     // 1. Определение имени тега
     let tag = '';
     const tagIdx = process.argv.indexOf('--tag');
@@ -237,12 +238,19 @@ async function startUpload() {
     if (!fs.existsSync(finalAsarPath)) {
       throw new Error(`Файл app.asar не найден по пути: ${finalAsarPath}. Убедитесь, что сначала запустили 'npm run package'!`);
     }
+    const setupPath = path.join(RELEASE_DIR, 'Flux Tasks Setup.exe');
+    if (!fs.existsSync(setupPath)) {
+      throw new Error(`Файл Flux Tasks Setup.exe не найден по пути: ${setupPath}. Сначала запустите 'npm run package'.`);
+    }
 
     // Файлы для загрузки
-    const uploadFiles = [
-      { path: latestJsonPath, name: 'latest.json' },
-      { path: finalAsarPath, name: 'app.asar' }
-    ];
+    const uploadFiles = setupOnly
+      ? [{ path: setupPath, name: 'Flux.Tasks.Setup.exe' }]
+      : [
+          { path: latestJsonPath, name: 'latest.json' },
+          { path: finalAsarPath, name: 'app.asar' },
+          { path: setupPath, name: 'Flux.Tasks.Setup.exe' }
+        ];
 
     // 5b. Валидация файлов перед загрузкой
     console.log('\nПроверка наличия файлов релиза...');

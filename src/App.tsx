@@ -1,25 +1,54 @@
-import React, { useLayoutEffect, useState } from 'react';
+import React, { lazy, Suspense, useLayoutEffect, useState } from 'react';
 import { StoreProvider, useStore } from './store';
 import { Sidebar } from './components/Sidebar';
-import { Dashboard } from './components/Dashboard';
-import { KanbanBoard } from './components/KanbanBoard';
-import { TaskListView } from './components/TaskListView';
-import { NewTaskModal } from './components/NewTaskModal';
-import { TaskDetailView } from './components/TaskDetailView';
-import { NotesView } from './components/NotesView';
-import { GitHubProjectDashboard } from './components/GitHubProjectDashboard';
-import { RoadmapView } from './components/RoadmapView';
-import { SettingsView } from './components/SettingsView';
-import { PromptsView } from './components/PromptsView';
-import { Onboarding } from './components/Onboarding';
-import { HistoryView } from './components/HistoryView';
-import { ArchiveView } from './components/ArchiveView';
-import { CommandPalette } from './components/CommandPalette';
 import { TitleBar } from './components/TitleBar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { getTranslation } from './localization';
-import * as Icons from 'lucide-react';
+import {
+  AlertCircle,
+  AlertOctagon,
+  AlertTriangle,
+  BookOpen,
+  Bug,
+  CheckCircle,
+  CheckSquare,
+  ChevronDown,
+  ChevronUp,
+  CircleDot,
+  Cpu,
+  FileText,
+  GitBranch,
+  Info,
+  Loader2,
+  Minus,
+  Rocket,
+  Search,
+  Sparkles,
+  Wrench,
+  X
+} from 'lucide-react';
 import { Task, TaskPriority, TaskStatus, TaskType } from './types';
+
+const Dashboard = lazy(() => import('./components/Dashboard').then(module => ({ default: module.Dashboard })));
+const KanbanBoard = lazy(() => import('./components/KanbanBoard').then(module => ({ default: module.KanbanBoard })));
+const TaskListView = lazy(() => import('./components/TaskListView').then(module => ({ default: module.TaskListView })));
+const NewTaskModal = lazy(() => import('./components/NewTaskModal').then(module => ({ default: module.NewTaskModal })));
+const TaskDetailView = lazy(() => import('./components/TaskDetailView').then(module => ({ default: module.TaskDetailView })));
+const NotesView = lazy(() => import('./components/NotesView').then(module => ({ default: module.NotesView })));
+const GitHubProjectDashboard = lazy(() => import('./components/GitHubProjectDashboard').then(module => ({ default: module.GitHubProjectDashboard })));
+const RoadmapView = lazy(() => import('./components/RoadmapView').then(module => ({ default: module.RoadmapView })));
+const SettingsView = lazy(() => import('./components/SettingsView').then(module => ({ default: module.SettingsView })));
+const PromptsView = lazy(() => import('./components/PromptsView').then(module => ({ default: module.PromptsView })));
+const Onboarding = lazy(() => import('./components/Onboarding').then(module => ({ default: module.Onboarding })));
+const HistoryView = lazy(() => import('./components/HistoryView').then(module => ({ default: module.HistoryView })));
+const ArchiveView = lazy(() => import('./components/ArchiveView').then(module => ({ default: module.ArchiveView })));
+const CommandPalette = lazy(() => import('./components/CommandPalette').then(module => ({ default: module.CommandPalette })));
+
+const ViewFallback = () => (
+  <div className="flex h-full flex-1 items-center justify-center text-white">
+    <Loader2 className="h-6 w-6 animate-spin text-indigo-500" />
+  </div>
+);
 
 function WorkspaceApp() {
   const {
@@ -30,6 +59,7 @@ function WorkspaceApp() {
     selectedProjectViewId,
     selectedTagViewName,
     selectedTask,
+    isCreateModalOpen,
     setSelectedTask,
     updateTask,
     deleteTask,
@@ -344,23 +374,23 @@ function WorkspaceApp() {
   // Resolve custom icon for task type
   const getTypeIcon = (type: TaskType) => {
     switch (type) {
-      case 'bug': return <Icons.Bug className="w-3.5 h-3.5" />;
-      case 'feature': return <Icons.Sparkles className="w-3.5 h-3.5" />;
-      case 'release': return <Icons.Rocket className="w-3.5 h-3.5" />;
-      case 'refactor': return <Icons.Wrench className="w-3.5 h-3.5" />;
-      case 'documentation': return <Icons.BookOpen className="w-3.5 h-3.5" />;
-      case 'prompt': return <Icons.Cpu className="w-3.5 h-3.5" />;
-      default: return <Icons.FileText className="w-3.5 h-3.5" />;
+      case 'bug': return <Bug className="w-3.5 h-3.5" />;
+      case 'feature': return <Sparkles className="w-3.5 h-3.5" />;
+      case 'release': return <Rocket className="w-3.5 h-3.5" />;
+      case 'refactor': return <Wrench className="w-3.5 h-3.5" />;
+      case 'documentation': return <BookOpen className="w-3.5 h-3.5" />;
+      case 'prompt': return <Cpu className="w-3.5 h-3.5" />;
+      default: return <FileText className="w-3.5 h-3.5" />;
     }
   };
 
   const getPriorityIcon = (prio: string) => {
     switch (prio) {
-      case 'urgent': return <Icons.AlertOctagon className="w-3.5 h-3.5 text-rose-400 shrink-0" />;
-      case 'high': return <Icons.ChevronUp className="w-3.5 h-3.5 text-orange-400 shrink-0" />;
-      case 'medium': return <Icons.Minus className="w-3.5 h-3.5 text-amber-400 shrink-0" />;
-      case 'low': return <Icons.ChevronDown className="w-3.5 h-3.5 text-blue-400 shrink-0" />;
-      default: return <Icons.CircleDot className="w-3.5 h-3.5 text-slate-500 shrink-0" />;
+      case 'urgent': return <AlertOctagon className="w-3.5 h-3.5 text-rose-400 shrink-0" />;
+      case 'high': return <ChevronUp className="w-3.5 h-3.5 text-orange-400 shrink-0" />;
+      case 'medium': return <Minus className="w-3.5 h-3.5 text-amber-400 shrink-0" />;
+      case 'low': return <ChevronDown className="w-3.5 h-3.5 text-blue-400 shrink-0" />;
+      default: return <CircleDot className="w-3.5 h-3.5 text-slate-500 shrink-0" />;
     }
   };
 
@@ -412,13 +442,13 @@ function WorkspaceApp() {
   if (isLoading) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-bg-base text-white select-none">
-        <Icons.Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+        <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
       </div>
     );
   }
 
   if (projects.length === 0) {
-    return <Onboarding />;
+    return <Suspense fallback={<ViewFallback />}><Onboarding /></Suspense>;
   }
 
   // Extract all dynamic tags in view for filter dropdown
@@ -495,7 +525,7 @@ function WorkspaceApp() {
       <div className="w-screen h-screen flex items-center justify-center bg-[#050508] p-4 text-slate-100 antialiased font-sans">
          <div className="w-full max-w-xl p-6 rounded-2xl border border-rose-500/25 bg-slate-950/40 backdrop-blur-xl shadow-2xl space-y-6">
            <div className="flex items-center gap-3 text-rose-400">
-             <Icons.AlertTriangle className="w-8 h-8 shrink-0 animate-bounce" />
+             <AlertTriangle className="w-8 h-8 shrink-0 animate-bounce" />
              <div>
                <h1 className="text-lg font-bold tracking-tight">{lang === 'ru' ? 'Режим восстановления' : lang === 'uk' ? 'Режим відновлення' : 'Recovery Mode'}</h1>
                <p className="text-xs text-slate-400">{lang === 'ru' ? 'Обнаружен критический сбой при запуске' : lang === 'uk' ? 'Виявлено критичний збій при запуску' : 'Critical startup failure detected'}</p>
@@ -573,7 +603,7 @@ function WorkspaceApp() {
               <div className="flex-1 flex items-center gap-4 min-w-0">
                 {/* Instant search block */}
                 <div className="relative flex-1 max-w-md">
-                  <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
                   <input
                     type="text"
                     value={filters.search}
@@ -582,7 +612,7 @@ function WorkspaceApp() {
                     className="w-full py-1.5 pl-9 pr-4 rounded-xl border border-white/5 bg-slate-900/45 text-xs text-white placeholder-slate-500 focus:outline-none accent-focus"
                   />
                   {filters.search && (
-                    <Icons.X 
+                    <X 
                       onClick={() => setFilters(f => ({ ...f, search: '' }))}
                       className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500 hover:text-white cursor-pointer"
                     />
@@ -668,7 +698,7 @@ function WorkspaceApp() {
                         : 'border-transparent hover:bg-white/5 hover:text-slate-200'
                     }`}
                   >
-                    <Icons.CheckSquare className="w-3.5 h-3.5" />
+                    <CheckSquare className="w-3.5 h-3.5" />
                     <span>{lang === 'ru' ? 'Задачи' : lang === 'uk' ? 'Завдання' : 'Tasks'}</span>
                   </button>
                   <button
@@ -680,13 +710,14 @@ function WorkspaceApp() {
                         : 'border-transparent hover:bg-white/5 hover:text-slate-200'
                     }`}
                   >
-                    <Icons.GitBranch className="w-3.5 h-3.5" />
+                    <GitBranch className="w-3.5 h-3.5" />
                     <span>Git / GitHub</span>
                   </button>
                 </div>
               </div>
             )}
             <ErrorBoundary>
+              <Suspense fallback={<ViewFallback />}>
               {selectedTask ? (
               <TaskDetailView />
             ) : currentView === 'dashboard' ? (
@@ -818,6 +849,7 @@ function WorkspaceApp() {
                 settings.taskViewMode === 'kanban' ? <KanbanBoard /> : <TaskListView />
               )
             )}
+              </Suspense>
             </ErrorBoundary>
           </div>
 
@@ -826,17 +858,25 @@ function WorkspaceApp() {
       </div>
 
       {/* NEW TASK GLOWING CREATOR BOX */}
-      <NewTaskModal />
+      {isCreateModalOpen && (
+        <Suspense fallback={null}>
+          <NewTaskModal />
+        </Suspense>
+      )}
 
       {/* COMMAND PALETTE */}
-      <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} />
+      {isCommandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette isOpen onClose={() => setIsCommandPaletteOpen(false)} />
+        </Suspense>
+      )}
 
       {/* STARTUP UPDATE POPUP MODAL */}
       {showUpdateModal && updateManifest && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 select-none">
           <div className="w-full max-w-md p-6 rounded-2xl border border-indigo-500/25 glass-panel space-y-5 animate-scale-up">
             <div className="flex items-center gap-3 text-indigo-400">
-              <Icons.Rocket className="w-8 h-8 shrink-0 animate-pulse" />
+              <Rocket className="w-8 h-8 shrink-0 animate-pulse" />
               <div>
                 <h2 className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{lang === 'ru' ? 'Доступно обновление' : lang === 'uk' ? 'Доступне оновлення' : 'New Update Available'}</h2>
                 <h1 className="text-base font-bold text-white leading-tight">Flux Tasks v{updateManifest.version}</h1>
@@ -856,7 +896,7 @@ function WorkspaceApp() {
 
             {installingUpdate ? (
               <div className="py-3 flex flex-col items-center justify-center gap-2">
-                <Icons.Loader2 className="w-6 h-6 accent-text animate-spin" />
+                <Loader2 className="w-6 h-6 accent-text animate-spin" />
                 <span className="text-xs text-slate-400">{lang === 'ru' ? 'Установка обновления...' : lang === 'uk' ? 'Встановлення оновлення...' : 'Installing update...'}</span>
               </div>
             ) : (
@@ -908,15 +948,15 @@ function WorkspaceApp() {
       {/* CUSTOM TOAST NOTIFICATION */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-[100] p-4 rounded-xl border border-white/10 bg-slate-900/90 backdrop-blur-xl shadow-2xl flex items-center gap-3 animate-fade-in max-w-sm select-none">
-          {toast.type === 'error' && <Icons.AlertCircle className="w-5 h-5 text-rose-500 shrink-0" />}
-          {toast.type === 'success' && <Icons.CheckCircle className="w-5 h-5 accent-text shrink-0" />}
-          {toast.type === 'info' && <Icons.Info className="w-5 h-5 text-sky-500 shrink-0" />}
+          {toast.type === 'error' && <AlertCircle className="w-5 h-5 text-rose-500 shrink-0" />}
+          {toast.type === 'success' && <CheckCircle className="w-5 h-5 accent-text shrink-0" />}
+          {toast.type === 'info' && <Info className="w-5 h-5 text-sky-500 shrink-0" />}
           <div className="text-xs font-medium text-slate-200 pr-4 leading-normal">{toast.message}</div>
           <button
             onClick={hideToast}
             className="text-slate-400 hover:text-white cursor-pointer active:scale-95 transition-all"
           >
-            <Icons.X className="w-4 h-4" />
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}

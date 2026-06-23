@@ -4,6 +4,7 @@ import { getTranslation } from '../localization';
 import * as Icons from 'lucide-react';
 import { Task, ChecklistItem, CodeSnippet, PromptItem, Attachment, TaskPriority, TaskStatus, TaskType } from '../types';
 import { MarkdownViewer } from './MarkdownViewer';
+import { getIconComponent } from '../iconRegistry';
 
 export const TaskDetailView: React.FC = () => {
   const {
@@ -304,9 +305,8 @@ export const TaskDetailView: React.FC = () => {
   };
 
   const renderIcon = (name: string, cls: string = "w-4 h-4") => {
-    const LucideIcon = (Icons as any)[name];
-    if (LucideIcon) return <LucideIcon className={cls} />;
-    return <Icons.FileText className={cls} />;
+    const Icon = getIconComponent(name, Icons.FileText);
+    return <Icon className={cls} />;
   };
 
   const countByCheck = () => {

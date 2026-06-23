@@ -1,9 +1,68 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useStore } from '../store';
 import { getTranslation } from '../localization';
-import * as Icons from 'lucide-react';
+import {
+  Archive,
+  ArchiveRestore,
+  Bug,
+  Calendar,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Cloud,
+  Code,
+  Cpu,
+  Database,
+  Edit3,
+  FileText,
+  Flame,
+  Folder,
+  FolderOpen,
+  Github,
+  Globe,
+  HelpCircle,
+  History,
+  LayoutDashboard,
+  ListTodo,
+  Map as MapIcon,
+  Monitor,
+  Network,
+  Palette,
+  Pin,
+  Plus,
+  Rocket,
+  Settings as SettingsIcon,
+  Shield,
+  Smartphone,
+  StickyNote,
+  Terminal
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { TaskStatus, Project } from '../types';
-import brandIcon from '../../assets/icon.png';
+import brandIcon from '../../assets/sidebar-icon.png';
+
+const PROJECT_ICONS: Record<string, LucideIcon> = {
+  Folder,
+  Code,
+  Globe,
+  Network,
+  Database,
+  Smartphone,
+  Monitor,
+  Palette,
+  Bug,
+  Rocket,
+  Shield,
+  Settings: SettingsIcon,
+  Github,
+  Cloud,
+  FileText,
+  Terminal,
+  Calendar,
+  Clock,
+  Flame
+};
 
 export const Sidebar: React.FC = () => {
   const {
@@ -85,16 +144,55 @@ export const Sidebar: React.FC = () => {
     teal: 'text-teal-400'
   };
 
-  const activeProjIds = new Set(projects.filter(p => p.status !== 'archived').map(p => p.id));
+  const {
+    pinnedProjects,
+    regularProjects,
+    archivedProjects,
+    statusCounts,
+    projectTaskCounts,
+    activeTaskCount,
+    archivedTaskCount
+  } = useMemo(() => {
+    const active = projects.filter(p => p.status !== 'archived');
+    const archived = projects.filter(p => p.status === 'archived');
+    const activeIds = new Set(active.map(p => p.id));
+    const byStatus = new Map<TaskStatus, number>();
+    const byProject = new Map<string, number>();
+    let activeCount = 0;
+    let archivedCount = 0;
+
+    for (const task of tasks) {
+      const belongsToActiveProject = task.projectId === 'unassigned' || activeIds.has(task.projectId);
+      if (belongsToActiveProject) {
+        byStatus.set(task.status, (byStatus.get(task.status) || 0) + 1);
+      }
+      if (task.status === 'completed' || task.status === 'cancelled') {
+        archivedCount += 1;
+      } else if (belongsToActiveProject) {
+        activeCount += 1;
+        byProject.set(task.projectId, (byProject.get(task.projectId) || 0) + 1);
+      }
+    }
+
+    return {
+      pinnedProjects: active.filter(p => p.pinned),
+      regularProjects: active.filter(p => !p.pinned),
+      archivedProjects: archived,
+      statusCounts: byStatus,
+      projectTaskCounts: byProject,
+      activeTaskCount: activeCount,
+      archivedTaskCount: archivedCount
+    };
+  }, [projects, tasks]);
 
   const countTasksByStatus = (status: TaskStatus) => {
-    return tasks.filter(t => t.status === status && (t.projectId === 'unassigned' || activeProjIds.has(t.projectId))).length;
+    return statusCounts.get(status) || 0;
   };
 
   const countTasksByProject = (projId: string) => {
     const proj = projects.find(p => p.id === projId);
     if (proj?.status === 'archived') return 0;
-    return tasks.filter(t => t.projectId === projId && t.status !== 'completed' && t.status !== 'cancelled').length;
+    return projectTaskCounts.get(projId) || 0;
   };
 
   const handleAddNewProject = (e: React.FormEvent) => {
@@ -167,15 +265,9 @@ export const Sidebar: React.FC = () => {
   };
 
   const getIcon = (name: string, cls: string = "w-4 h-4 shrink-0") => {
-    const LucideIcon = (Icons as any)[name];
-    if (LucideIcon) return <LucideIcon className={cls} />;
-    return <Icons.Folder className={cls} />;
+    const Icon = PROJECT_ICONS[name] || Folder;
+    return <Icon className={cls} />;
   };
-
-  const activeProjects = projects.filter(p => p.status !== 'archived');
-  const pinnedProjects = activeProjects.filter(p => p.pinned);
-  const regularProjects = activeProjects.filter(p => !p.pinned);
-  const archivedProjects = projects.filter(p => p.status === 'archived');
 
   return (
     <>
@@ -214,7 +306,7 @@ export const Sidebar: React.FC = () => {
             title={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
             style={{ WebkitAppRegion: 'no-drag' } as any}
           >
-            {isCollapsed ? <Icons.ChevronRight className="w-4 h-4" /> : <Icons.ChevronLeft className="w-3.5 h-3.5" />}
+            {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-3.5 h-3.5" />}
           </button>
         </div>
   
@@ -225,7 +317,7 @@ export const Sidebar: React.FC = () => {
             className="btn-primary w-full py-2 px-2.5 flex items-center justify-center gap-2 text-xs text-white cursor-pointer transition-all duration-200 active:scale-[0.98]"
             title={getTranslation(lang, 'newTask')}
           >
-            <Icons.Plus className="w-4 h-4 stroke-[2.5]" />
+            <Plus className="w-4 h-4 stroke-[2.5]" />
             {!isCollapsed && <span className="truncate">{getTranslation(lang, 'newTask')}</span>}
           </button>
         </div>
@@ -244,7 +336,7 @@ export const Sidebar: React.FC = () => {
             title={getTranslation(lang, 'dashboard')}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.LayoutDashboard className="w-4 h-4 shrink-0 accent-text" />
+              <LayoutDashboard className="w-4 h-4 shrink-0 accent-text" />
               {!isCollapsed && <span className="truncate">{getTranslation(lang, 'dashboard')}</span>}
             </div>
           </button>
@@ -260,10 +352,10 @@ export const Sidebar: React.FC = () => {
             title={getTranslation(lang, 'allTasks')}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.ListTodo className="w-4 h-4 shrink-0 text-blue-400" />
+              <ListTodo className="w-4 h-4 shrink-0 text-blue-400" />
               {!isCollapsed && <span className="truncate">{getTranslation(lang, 'allTasks')}</span>}
             </div>
-            {!isCollapsed && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/5 border border-white/5 text-white/40">{tasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled' && (t.projectId === 'unassigned' || activeProjIds.has(t.projectId))).length}</span>}
+            {!isCollapsed && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/5 border border-white/5 text-white/40">{activeTaskCount}</span>}
           </button>
   
           {/* AI Prompts */}
@@ -277,7 +369,7 @@ export const Sidebar: React.FC = () => {
             title={lang === 'ru' ? 'Промпты' : lang === 'uk' ? 'Промпти' : 'Prompts'}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.Cpu className="w-4 h-4 shrink-0 accent-text" />
+              <Cpu className="w-4 h-4 shrink-0 accent-text" />
               {!isCollapsed && <span className="truncate">{lang === 'ru' ? 'Промпты' : lang === 'uk' ? 'Промпти' : 'Prompts'}</span>}
             </div>
           </button>
@@ -293,7 +385,7 @@ export const Sidebar: React.FC = () => {
             title={getTranslation(lang, 'notes')}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.StickyNote className="w-4 h-4 shrink-0 accent-text" />
+              <StickyNote className="w-4 h-4 shrink-0 accent-text" />
               {!isCollapsed && <span className="truncate">{getTranslation(lang, 'notes')}</span>}
             </div>
           </button>
@@ -309,7 +401,7 @@ export const Sidebar: React.FC = () => {
             title={getTranslation(lang, 'roadmap')}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.Map className="w-4 h-4 shrink-0 text-purple-400" />
+              <MapIcon className="w-4 h-4 shrink-0 text-purple-400" />
               {!isCollapsed && <span className="truncate">{getTranslation(lang, 'roadmap')}</span>}
             </div>
           </button>
@@ -325,7 +417,7 @@ export const Sidebar: React.FC = () => {
             title={lang === 'ru' ? 'История изменений' : lang === 'uk' ? 'Історія змін' : 'Activity History'}
           >
             <div className="flex items-center gap-2 truncate">
-              <Icons.History className="w-4 h-4 shrink-0 text-amber-400" />
+              <History className="w-4 h-4 shrink-0 text-amber-400" />
               {!isCollapsed && <span className="truncate">{lang === 'ru' ? 'История' : lang === 'uk' ? 'Історія' : 'History'}</span>}
             </div>
           </button>
@@ -356,7 +448,7 @@ export const Sidebar: React.FC = () => {
             </div>
             {!isCollapsed && (
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/5 border border-white/5 text-white/40">
-                {tasks.filter(t => t.status === 'completed' || t.status === 'cancelled').length}
+                {archivedTaskCount}
               </span>
             )}
           </button>
@@ -369,10 +461,10 @@ export const Sidebar: React.FC = () => {
                 className="w-full flex items-center justify-between px-2.5 py-1 text-[10px] font-semibold text-white/40 tracking-wider uppercase hover:text-white transition-colors"
               >
                 <div className="flex items-center gap-1">
-                  {isProjectsExpanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                  {isProjectsExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                   <span>{getTranslation(lang, 'projects')}</span>
                 </div>
-                <Icons.Plus 
+                <Plus 
                   className="w-3.5 h-3.5 accent-hover-text transition-colors cursor-pointer"
                   onClick={(e) => { e.stopPropagation(); setIsNewProjectOpen(true); }}
                 />
@@ -404,7 +496,7 @@ export const Sidebar: React.FC = () => {
                       className="w-full flex items-center justify-between px-2.5 py-1 text-[9px] font-bold text-white/20 tracking-wider uppercase hover:text-white/40 transition-colors"
                     >
                       <span>{lang === 'ru' ? 'Архив проектов' : 'Archived'} ({archivedProjects.length})</span>
-                      {isArchivedExpanded ? <Icons.ChevronDown className="w-2.5 h-2.5" /> : <Icons.ChevronRight className="w-2.5 h-2.5" />}
+                      {isArchivedExpanded ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronRight className="w-2.5 h-2.5" />}
                     </button>
                     {isArchivedExpanded && (
                       <div className="space-y-0.5 mt-1 opacity-60">
@@ -458,7 +550,7 @@ export const Sidebar: React.FC = () => {
                 className="w-full flex items-center justify-between px-2.5 py-1 text-[10px] font-semibold text-white/40 tracking-wider uppercase hover:text-white transition-colors"
               >
                 <div className="flex items-center gap-1">
-                  {isStatusExpanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                  {isStatusExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                   <span>{getTranslation(lang, 'chooseStatus')}</span>
                 </div>
               </button>
@@ -470,7 +562,7 @@ export const Sidebar: React.FC = () => {
               <div className="pl-1.5 mt-1 space-y-0.5">
                 {statusesList.map(({ status, labelKey, icon, bgClass, textClass }) => {
                   const isSelected = currentView === status;
-                  const IconComponent = (Icons as any)[icon] || Icons.HelpCircle;
+                  const IconComponent = PROJECT_ICONS[icon] || HelpCircle;
                   return (
                     <button
                       key={status}
@@ -514,7 +606,7 @@ export const Sidebar: React.FC = () => {
             }`}
             title={getTranslation(lang, 'settings')}
           >
-            <Icons.Settings className="w-4 h-4 text-slate-400" />
+            <SettingsIcon className="w-4 h-4 text-slate-400" />
             {!isCollapsed && <span className="truncate">{getTranslation(lang, 'settings')}</span>}
           </button>
         </div>
@@ -574,7 +666,7 @@ export const Sidebar: React.FC = () => {
                 <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{lang === 'ru' ? 'Иконка' : lang === 'uk' ? 'Іконка' : 'Project Icon'}</label>
                 <div className="grid grid-cols-4 gap-2.5 max-h-[160px] overflow-y-auto pr-1.5 select-none scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent p-0.5">
                   {projectIcons.map((item) => {
-                    const IconComp = (Icons as any)[item.icon] || Icons.Folder;
+                    const IconComp = PROJECT_ICONS[item.icon] || Folder;
                     const isSelected = newProjIcon === item.icon;
                     return (
                       <div 
@@ -668,7 +760,7 @@ export const Sidebar: React.FC = () => {
                 <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{lang === 'ru' ? 'Иконка' : lang === 'uk' ? 'Іконка' : 'Project Icon'}</label>
                 <div className="grid grid-cols-4 gap-2.5 max-h-[160px] overflow-y-auto pr-1.5 select-none scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent p-0.5">
                   {projectIcons.map((item) => {
-                    const IconComp = (Icons as any)[item.icon] || Icons.Folder;
+                    const IconComp = PROJECT_ICONS[item.icon] || Folder;
                     const isSelected = editProjIcon === item.icon;
                     return (
                       <div 
@@ -752,7 +844,7 @@ export const Sidebar: React.FC = () => {
                         }}
                         className="p-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 transition-all cursor-pointer active:scale-95 flex items-center justify-center shrink-0"
                       >
-                        <Icons.FolderOpen className="w-4 h-4" />
+                        <FolderOpen className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
@@ -826,7 +918,7 @@ export const Sidebar: React.FC = () => {
               className={`hidden group-hover/proj:block p-0.5 text-slate-500 hover:text-amber-400 ${proj.pinned ? 'text-amber-400 block' : ''}`}
               title={proj.pinned ? "Unpin Project" : "Pin Project"}
             >
-              <Icons.Pin className={`w-3 h-3 ${proj.pinned ? 'fill-amber-400 text-amber-400' : ''}`} />
+              <Pin className={`w-3 h-3 ${proj.pinned ? 'fill-amber-400 text-amber-400' : ''}`} />
             </button>
           )}
 
@@ -836,7 +928,7 @@ export const Sidebar: React.FC = () => {
             className="hidden group-hover/proj:block p-0.5 text-slate-500 hover:text-purple-400"
             title={proj.status === 'active' ? "Archive Project" : "Restore Project"}
           >
-            {proj.status === 'active' ? <Icons.Archive className="w-3 h-3" /> : <Icons.ArchiveRestore className="w-3 h-3" />}
+            {proj.status === 'active' ? <Archive className="w-3 h-3" /> : <ArchiveRestore className="w-3 h-3" />}
           </button>
 
           {/* Edit details */}
@@ -845,7 +937,7 @@ export const Sidebar: React.FC = () => {
             className="hidden group-hover/proj:block p-0.5 text-slate-500 hover:text-white"
             title="Edit Project"
           >
-            <Icons.Edit3 className="w-3 h-3" />
+            <Edit3 className="w-3 h-3" />
           </button>
 
           {/* Tasks Count badge */}

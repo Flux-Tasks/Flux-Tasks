@@ -4,6 +4,7 @@ import { getTranslation } from '../localization';
 import * as Icons from 'lucide-react';
 import { GlassPreset, BackgroundStyle, AppLanguage } from '../types';
 import { GitHubSettings } from './GitHubSettings';
+import { getIconComponent } from '../iconRegistry';
 
 export const SettingsView: React.FC = () => {
   const {
@@ -281,7 +282,7 @@ export const SettingsView: React.FC = () => {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 select-none">
               {bgConfigs.map(({ style, labelKey, icon }) => {
                 const isSel = settings.bgStyle === style;
-                const IconComponent = (Icons as any)[icon] || Icons.HelpCircle;
+                const IconComponent = getIconComponent(icon, Icons.HelpCircle);
                 return (
                   <div
                     key={style}

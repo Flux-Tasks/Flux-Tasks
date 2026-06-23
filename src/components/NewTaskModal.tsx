@@ -3,6 +3,7 @@ import { useStore, TASK_TEMPLATES } from '../store';
 import { getTranslation } from '../localization';
 import * as Icons from 'lucide-react';
 import { TaskType, TaskStatus, TaskPriority, PromptItem, CodeSnippet, Attachment, ChecklistItem } from '../types';
+import { getIconComponent } from '../iconRegistry';
 
 export const NewTaskModal: React.FC = () => {
   const {
@@ -226,9 +227,8 @@ export const NewTaskModal: React.FC = () => {
   };
 
   const renderIcon = (name: string, cls: string = "w-5 h-5") => {
-    const LucideIcon = (Icons as any)[name];
-    if (LucideIcon) return <LucideIcon className={cls} />;
-    return <Icons.FileText className={cls} />;
+    const Icon = getIconComponent(name, Icons.FileText);
+    return <Icon className={cls} />;
   };
 
   return (

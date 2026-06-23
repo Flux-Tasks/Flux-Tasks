@@ -395,7 +395,8 @@ async function startRelease() {
     const setupSha256 = computeSha256(sourceSetupPath);
 
     const asarUrl = `https://github.com/${repoOwner}/${repoName}/releases/download/v${version}/app.asar`;
-    const packageUrl = `https://github.com/${repoOwner}/${repoName}/releases/download/v${version}/Flux%20Tasks%20Setup.exe`;
+    const packageUrl = `https://github.com/${repoOwner}/${repoName}/releases/download/v${version}/Flux.Tasks.Setup.exe`;
+    const packageMirrorUrl = `https://github.com/${repoOwner}/${repoName}/releases/latest/download/Flux.Tasks.Setup.exe`;
 
     const manifest = {
       version: version,
@@ -403,6 +404,7 @@ async function startRelease() {
       updateType: 'asar',
       asarUrl: asarUrl,
       packageUrl: packageUrl,
+      packageMirrorUrl: packageMirrorUrl,
       packageSha256: setupSha256,
       packageSize: setupSize,
       sha256: asarSha256,
@@ -428,6 +430,20 @@ async function startRelease() {
     }
     console.log('Манифесты OTA-обновления созданы');
 
+    const webInstallerConfig = {
+      version,
+      primaryUrl: packageUrl,
+      mirrorUrl: packageMirrorUrl,
+      expectedSha256: setupSha256,
+      fileName: 'FluxTasks-Setup.exe'
+    };
+    fs.writeFileSync(
+      path.join(PROJECT_DIR, 'installer-config.json'),
+      JSON.stringify(webInstallerConfig, null, 2) + '\n',
+      'utf8'
+    );
+    console.log('Конфигурация Web Installer обновлена: installer-config.json');
+
     // Копирование файлов в packages/channel/
     const packagesChannelDir = path.join(PROJECT_DIR, 'packages', channel);
     if (!fs.existsSync(packagesChannelDir)) {
@@ -440,7 +456,7 @@ async function startRelease() {
     fs.copyFileSync(sourceSetupPath, path.join(packagesChannelDir, 'Flux Tasks Setup.exe'));
     console.log(`Файлы обновлений скопированы в packages/${channel}/`);
 
-    // Файлы для загрузки на GitHub Releases (только манифесты и app.asar)
+    // Файлы для загрузки на GitHub Releases
     const uploadFiles = [];
 
     // 1. Добавление манифестов
@@ -453,6 +469,8 @@ async function startRelease() {
 
     // 2. Добавление app.asar
     uploadFiles.push({ path: finalAsarPath, name: 'app.asar' });
+    // 3. Полный установщик необходим Web Installer и fallback-обновлению
+    uploadFiles.push({ path: sourceSetupPath, name: 'Flux.Tasks.Setup.exe' });
 
     // 5c. Валидация загружаемых файлов перед релизом
     console.log('\nПроверка наличия файлов релиза...');
